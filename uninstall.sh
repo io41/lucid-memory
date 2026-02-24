@@ -84,7 +84,7 @@ if [ -f "$MCP_CONFIG" ] && grep -q "lucid-memory" "$MCP_CONFIG" 2>/dev/null; the
 fi
 
 CLAUDE_SETTINGS="$CLAUDE_SETTINGS_DIR/settings.json"
-if [ -f "$CLAUDE_SETTINGS" ] && grep -q "UserPromptSubmit" "$CLAUDE_SETTINGS" 2>/dev/null; then
+if [ -f "$CLAUDE_SETTINGS" ] && grep -qE "UserPromptSubmit|Stop" "$CLAUDE_SETTINGS" 2>/dev/null; then
     REMOVE_LIST="${REMOVE_LIST}\n  ${C4}•${NC} Hook config from ~/.claude/settings.json"
 fi
 
@@ -254,6 +254,14 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
                     )
                 ] |
                 if (.hooks.UserPromptSubmit | length) == 0 then del(.hooks.UserPromptSubmit) else . end
+            else . end |
+            if .hooks.Stop then
+                .hooks.Stop = [
+                    .hooks.Stop[] | select(
+                        (.hooks // []) | all(.command | test("lucid|stop\\.sh") | not)
+                    )
+                ] |
+                if (.hooks.Stop | length) == 0 then del(.hooks.Stop) else . end
             else . end
         ' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" 2>/dev/null; then
             mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
@@ -269,15 +277,19 @@ settings_path = os.path.expanduser("~/.claude/settings.json")
 try:
     with open(settings_path, 'r') as f:
         config = json.load(f)
-    if 'hooks' in config and 'UserPromptSubmit' in config['hooks']:
-        filtered = [e for e in config['hooks']['UserPromptSubmit'] if not any(
-            re.search(r'lucid|user-prompt-submit', h.get('command', ''))
-            for h in e.get('hooks', [])
-        )]
-        if filtered:
-            config['hooks']['UserPromptSubmit'] = filtered
-        else:
-            del config['hooks']['UserPromptSubmit']
+    changed = False
+    for event_name, pattern in [('UserPromptSubmit', r'lucid|user-prompt-submit'), ('Stop', r'lucid|stop\.sh')]:
+        if 'hooks' in config and event_name in config['hooks']:
+            filtered = [e for e in config['hooks'][event_name] if not any(
+                re.search(pattern, h.get('command', ''))
+                for h in e.get('hooks', [])
+            )]
+            if filtered:
+                config['hooks'][event_name] = filtered
+            else:
+                del config['hooks'][event_name]
+            changed = True
+    if changed:
         with open(settings_path, 'w') as f:
             json.dump(config, f, indent=2)
 except Exception:

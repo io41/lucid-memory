@@ -1663,7 +1663,7 @@ echo "Installing memory hooks..."
 LUCID_HOOKS_DIR="$LUCID_DIR/hooks"
 mkdir -p "$LUCID_HOOKS_DIR"
 
-# Claude Code hook (UserPromptSubmit)
+# Claude Code hooks (UserPromptSubmit + Stop)
 if [ "$INSTALL_CLAUDE" = true ]; then
     if [ -f "$LUCID_DIR/server/hooks/user-prompt-submit.sh" ]; then
         cp "$LUCID_DIR/server/hooks/user-prompt-submit.sh" "$LUCID_HOOKS_DIR/user-prompt-submit.sh"
@@ -1671,6 +1671,13 @@ if [ "$INSTALL_CLAUDE" = true ]; then
         success "Claude hook script installed"
     else
         warn "Claude hook script not found - automatic context injection disabled"
+    fi
+    if [ -f "$LUCID_DIR/server/hooks/stop.sh" ]; then
+        cp "$LUCID_DIR/server/hooks/stop.sh" "$LUCID_HOOKS_DIR/stop.sh"
+        chmod +x "$LUCID_HOOKS_DIR/stop.sh"
+        success "Claude Stop hook script installed"
+    else
+        warn "Claude Stop hook script not found - assistant response capture disabled"
     fi
 fi
 
@@ -1715,21 +1722,23 @@ HOOK_COMMAND="$LUCID_HOOKS_DIR/user-prompt-submit.sh"
 configure_hook() {
     local settings_file="$1"
     local hook_cmd="$2"
+    local event_name="${3:-UserPromptSubmit}"
+    local match_pattern="${4:-lucid|user-prompt-submit}"
 
     # If jq is available, use it
     if command -v jq &> /dev/null; then
         if [ -f "$settings_file" ]; then
             # Merge: keep existing non-Lucid hooks, add Lucid's entry
-            jq --arg cmd "$hook_cmd" '
-                .hooks.UserPromptSubmit = (
-                    [(.hooks.UserPromptSubmit // [])[] | select(
-                        (.hooks // []) | all(.command | test("lucid|user-prompt-submit") | not)
+            jq --arg cmd "$hook_cmd" --arg evt "$event_name" --arg pat "$match_pattern" '
+                .hooks[$evt] = (
+                    [(.hooks[$evt] // [])[] | select(
+                        (.hooks // []) | all(.command | test($pat) | not)
                     )] + [{"hooks": [{"type": "command", "command": $cmd}]}]
                 )
             ' "$settings_file" > "$settings_file.tmp" && mv "$settings_file.tmp" "$settings_file"
         else
-            jq -n --arg cmd "$hook_cmd" '
-                {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": $cmd}]}]}}
+            jq -n --arg cmd "$hook_cmd" --arg evt "$event_name" '
+                {"hooks": {($evt): [{"hooks": [{"type": "command", "command": $cmd}]}]}}
             ' > "$settings_file"
         fi
         return 0
@@ -1737,9 +1746,9 @@ configure_hook() {
 
     # If python is available, use it
     if command -v python3 &> /dev/null; then
-        python3 - "$settings_file" "$hook_cmd" << 'PYEOF'
+        python3 - "$settings_file" "$hook_cmd" "$event_name" "$match_pattern" << 'PYEOF'
 import json, sys, os, re
-settings_file, hook_cmd = sys.argv[1], sys.argv[2]
+settings_file, hook_cmd, event_name, match_pattern = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 if os.path.exists(settings_file):
     with open(settings_file, 'r') as f:
         config = json.load(f)
@@ -1747,13 +1756,13 @@ else:
     config = {}
 if 'hooks' not in config:
     config['hooks'] = {}
-existing = config['hooks'].get('UserPromptSubmit', [])
+existing = config['hooks'].get(event_name, [])
 filtered = [e for e in existing if not any(
-    re.search(r'lucid|user-prompt-submit', h.get('command', ''))
+    re.search(match_pattern, h.get('command', ''))
     for h in e.get('hooks', [])
 )]
 filtered.append({'hooks': [{'type': 'command', 'command': hook_cmd}]})
-config['hooks']['UserPromptSubmit'] = filtered
+config['hooks'][event_name] = filtered
 with open(settings_file, 'w') as f:
     json.dump(config, f, indent=2)
 PYEOF
@@ -1765,7 +1774,7 @@ PYEOF
         cat > "$settings_file" << EOF
 {
   "hooks": {
-    "UserPromptSubmit": [
+    "$event_name": [
       {
         "hooks": [
           {"type": "command", "command": "$hook_cmd"}
@@ -1781,15 +1790,22 @@ EOF
     warn "Cannot safely modify settings.json without jq or python"
     echo ""
     echo "Please manually add this to $settings_file:"
-    echo -e "${BOLD}\"hooks\": { \"UserPromptSubmit\": [{ \"hooks\": [{ \"type\": \"command\", \"command\": \"$hook_cmd\" }] }] }${NC}"
+    echo -e "${BOLD}\"hooks\": { \"$event_name\": [{ \"hooks\": [{ \"type\": \"command\", \"command\": \"$hook_cmd\" }] }] }${NC}"
     return 1
 }
 
+STOP_HOOK_COMMAND="$LUCID_HOOKS_DIR/stop.sh"
+
 if [ "$INSTALL_CLAUDE" = true ]; then
-    if configure_hook "$CLAUDE_SETTINGS" "$HOOK_COMMAND"; then
-        success "Claude hook configured in settings.json"
+    if configure_hook "$CLAUDE_SETTINGS" "$HOOK_COMMAND" "UserPromptSubmit" "lucid|user-prompt-submit"; then
+        success "Claude UserPromptSubmit hook configured in settings.json"
     else
-        warn "Claude hook configuration requires manual setup"
+        warn "Claude UserPromptSubmit hook configuration requires manual setup"
+    fi
+    if configure_hook "$CLAUDE_SETTINGS" "$STOP_HOOK_COMMAND" "Stop" "lucid|stop\\.sh"; then
+        success "Claude Stop hook configured in settings.json"
+    else
+        warn "Claude Stop hook configuration requires manual setup"
     fi
 fi
 
